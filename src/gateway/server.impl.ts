@@ -95,6 +95,10 @@ import { createGatewayReloadHandlers } from "./server-reload-handlers.js";
 import { resolveGatewayRuntimeConfig } from "./server-runtime-config.js";
 import { createGatewayRuntimeState } from "./server-runtime-state.js";
 import { resolveSessionKeyForRun } from "./server-session-key.js";
+import {
+  listSessionsFromStore,
+  loadCombinedSessionStoreForGateway,
+} from "./session-utils.js";
 import { logGatewayStartup } from "./server-startup-log.js";
 import { startGatewaySidecars } from "./server-startup.js";
 import { startGatewayTailscaleExposure } from "./server-tailscale.js";
@@ -452,9 +456,22 @@ export async function startGatewayServer(
     startDiagnosticHeartbeat();
   }
   setGatewaySigusr1RestartPolicy({ allowExternal: isRestartEnabled(cfgAtStart) });
-  setPreRestartDeferralCheck(
-    () => getTotalQueueSize() + getTotalPendingReplies() + getActiveEmbeddedRunCount(),
-  );
+  setPreRestartDeferralCheck(() => {
+    const internalPending =
+      getTotalQueueSize() + getTotalPendingReplies() + getActiveEmbeddedRunCount();
+    // Fail-closed: block restart if any non-cron sessions were updated in the last 60 s.
+    // This catches in-flight LLM calls / tool executions in other CLI sessions that
+    // are invisible to the internal pending counters above.
+    const SESSION_ACTIVE_MS = 60_000;
+    const now = Date.now();
+    const cfg = loadConfig();
+    const { storePath, store } = loadCombinedSessionStoreForGateway(cfg);
+    const result = listSessionsFromStore({ cfg, storePath, store, opts: { activeMinutes: 1 } });
+    const activeSessionCount = result.sessions.filter(
+      (s) => !s.systemSent && (s.updatedAt ?? 0) >= now - SESSION_ACTIVE_MS,
+    ).length;
+    return internalPending + activeSessionCount;
+  });
   // Unconditional startup migration: seed gateway.controlUi.allowedOrigins for existing
   // non-loopback installs that upgraded to v2026.2.26+ without required origins.
   cfgAtStart = await maybeSeedControlUiAllowedOriginsAtStartup({
