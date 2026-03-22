@@ -206,6 +206,89 @@ describe("buildInboundUserContextPrefix", () => {
     expect(senderInfo["id"]).toBe("+15551234567");
   });
 
+  it("suppresses sender block for direct webchat with gateway-client transport identity", () => {
+    // Regression test: direct webchat sessions expose transport identity as sender
+    // metadata (SenderName="openclaw-tui", SenderId="gateway-client"). This should
+    // NOT be surfaced as a sender block since it can misguide caller-mode inference
+    // toward AGENT, triggering JSON-only reply formatting.
+    const text = buildInboundUserContextPrefix({
+      ChatType: "direct",
+      Surface: "webchat",
+      SenderName: "openclaw-tui",
+      SenderId: "gateway-client",
+    } as TemplateContext);
+
+    // No sender block should appear for transport-only identity on direct webchat
+    expect(text).not.toContain("Sender (untrusted metadata):");
+    expect(text).not.toContain("gateway-client");
+  });
+
+  it("suppresses sender block for direct webchat with openclaw-tui transport identity", () => {
+    const text = buildInboundUserContextPrefix({
+      ChatType: "direct",
+      SenderName: "openclaw-tui",
+      SenderId: "gateway-client",
+    } as TemplateContext);
+
+    expect(text).not.toContain("Sender (untrusted metadata):");
+  });
+
+  it("suppresses sender block for direct webchat when channel is undefined (webchat surface)", () => {
+    // When OriginatingChannel is undefined and Surface is undefined, the channel
+    // resolves to "webchat" for direct chats — this should also suppress transport senders
+    const text = buildInboundUserContextPrefix({
+      ChatType: "direct",
+      SenderName: "openclaw-tui",
+      SenderId: "gateway-client",
+    } as TemplateContext);
+
+    expect(text).not.toContain("Sender (untrusted metadata):");
+  });
+
+  it("still includes sender block for direct external channel with transport identity", () => {
+    // Transport sender suppression only applies to direct webchat, not external channels
+    const text = buildInboundUserContextPrefix({
+      ChatType: "direct",
+      OriginatingChannel: "telegram",
+      SenderName: "openclaw-tui",
+      SenderId: "gateway-client",
+    } as TemplateContext);
+
+    // Should include sender block since it's not direct webchat
+    expect(text).toContain("Sender (untrusted metadata):");
+    const senderInfo = parseSenderInfoPayload(text);
+    expect(senderInfo["label"]).toBe("openclaw-tui (gateway-client)");
+  });
+
+  it("still includes sender block for group chats with transport identity", () => {
+    // Group chats are not direct webchat, so transport senders are not suppressed
+    const text = buildInboundUserContextPrefix({
+      ChatType: "group",
+      SenderName: "openclaw-tui",
+      SenderId: "gateway-client",
+      MessageSid: "msg-group",
+      ConversationLabel: "some-group",
+    } as TemplateContext);
+
+    expect(text).toContain("Sender (untrusted metadata):");
+    const senderInfo = parseSenderInfoPayload(text);
+    expect(senderInfo["label"]).toBe("openclaw-tui (gateway-client)");
+  });
+
+  it("still includes sender block for direct chats with real user identity", () => {
+    // Real user identity should never be suppressed
+    const text = buildInboundUserContextPrefix({
+      ChatType: "direct",
+      Surface: "webchat",
+      SenderName: "Tyler",
+      SenderId: "+15551234567",
+    } as TemplateContext);
+
+    expect(text).toContain("Sender (untrusted metadata):");
+    const senderInfo = parseSenderInfoPayload(text);
+    expect(senderInfo["label"]).toBe("Tyler (+15551234567)");
+  });
+
   it("includes formatted timestamp in conversation info when provided", () => {
     const text = buildInboundUserContextPrefix({
       ChatType: "group",
