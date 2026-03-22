@@ -42,6 +42,54 @@ function resolveInboundChannel(ctx: TemplateContext): string | undefined {
   return channelValue;
 }
 
+/**
+ * Returns true if the sender label represents only a transport/client identity
+ * with no real user identity. These transport labels (e.g., "gateway-client",
+ * "openclaw-tui") should not be surfaced to the model for direct webchat sessions
+ * as they can incorrectly tip caller-mode inference toward AGENT, causing
+ * JSON-only reply formatting instead of human-facing prose.
+ */
+function isTransportSenderLabel(label: string): boolean {
+  const lowerLabel = label.toLowerCase();
+  // Check for common transport/client UI sender patterns
+  // These are UI transport identities, not actual user identities
+  if (lowerLabel === "gateway-client") {
+    return true;
+  }
+  // Matches "openclaw-tui" or "openclaw-tui (gateway-client)" etc.
+  if (lowerLabel.startsWith("openclaw-") && lowerLabel.endsWith("-tui")) {
+    return true;
+  }
+  // Matches "(gateway-client)" suffix without a real display name
+  if (lowerLabel === "(gateway-client)") {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Returns true if the sender block should be suppressed for direct webchat sessions.
+ * Direct webchat/TUI sessions expose transport identity as user-role sender metadata
+ * (e.g., SenderName="openclaw-tui", SenderId="gateway-client"), which can misguide
+ * caller-mode inference toward AGENT and trigger JSON-only reply formatting.
+ */
+function shouldSuppressSenderForDirectWebchat(
+  ctx: TemplateContext,
+  label: string,
+): boolean {
+  const chatType = normalizeChatType(ctx.ChatType);
+  const isDirect = !chatType || chatType === "direct";
+  if (!isDirect) {
+    return false;
+  }
+  const directChannelValue = resolveInboundChannel(ctx);
+  const isWebchatDirect = !directChannelValue || directChannelValue === "webchat";
+  if (!isWebchatDirect) {
+    return false;
+  }
+  return isTransportSenderLabel(label);
+}
+
 export function buildInboundMetaSystemPrompt(ctx: TemplateContext): string {
   const chatType = normalizeChatType(ctx.ChatType);
   const isDirect = !chatType || chatType === "direct";
@@ -149,7 +197,10 @@ export function buildInboundUserContextPrefix(ctx: TemplateContext): string {
     tag: safeTrim(ctx.SenderTag),
     e164: safeTrim(ctx.SenderE164),
   };
-  if (senderInfo?.label) {
+  if (
+    senderInfo?.label &&
+    !shouldSuppressSenderForDirectWebchat(ctx, senderInfo.label)
+  ) {
     blocks.push(
       ["Sender (untrusted metadata):", "```json", JSON.stringify(senderInfo, null, 2), "```"].join(
         "\n",
